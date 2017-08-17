@@ -1,0 +1,461 @@
+---
+title: "ReproducibleResearchNOAA"
+author: "Chau Lui"
+date: "July 28, 2017"
+output: html_document
+---
+
+# U.S. Weather events and the cost of human lives and properties/crops
+
+This analysis is based on the U.S. National Oceanic and Atmospheric Administration's (NOAA) storm database tracks characteristics of major storms and weather events covering the United States and starting in the year 1950 and ending in November 2011. The focus is on the cost of human lives and the cost of damages.
+
+A couple of questions to address:
+
+1) which types of events caused the most fatalities and injuries. Taking into consideration the toll of each instance (average number of fatalities and injuries) and the total number of fatalities and injuries (sum)
+
+2) which types of events caused the greatest economic damage in terms of properties and crops.
+
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE)
+
+#setwd("C:/WorkingR/Course5Week4")
+
+library(dplyr)
+library(stringdist)
+library(ggplot2) 
+
+
+```
+
+## Data Processing - Load Data
+```{r load data, cache=TRUE}
+
+# 1. reading in the dataset and/or processing the data
+
+fileUrl <- "https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2"
+# 
+
+if(!file.exists("repdata-data-StormData.csv.bz2")) download.file(fileUrl, destfile = "repdata-data-StormData.csv.bz2")
+
+stormData <- read.csv("repdata-data-StormData.csv.bz2")
+
+names(stormData)
+
+```
+
+
+### Read in the standard Event names from page 6 - 2.1.1 Storm Data Event Table: 
+[NATIONAL WEATHER SERVICE INSTRUCTION 10-1605](https://d396qusza40orc.cloudfront.net/repdata%2Fpeer2_doc%2Fpd01016005curr.pdf)
+
+From page 6 - 2.1.1 Storm Data Event Table. Copy and paste Storm Data Event Types into a CSV file and read in data.
+
+```{r}
+StdEventNames <- read.csv("StormDataEventNames.csv", stringsAsFactors = FALSE)
+str(StdEventNames)
+```
+
+## A reusable function to clean up/review and manually adjust EVTYPE typos and restrict categorization.
+
+Closure function 'cleanUpNames' accepts a standard list of EVTYPEs (48 items) and a returns a function. 
+Returned function (B) will accept a list (data frame: tmpDF) of unique EVTYPEs for a specific measurement (colName).
+
+1. (B)Function exports a CSV with the EVTYPEs and possible matches to standard list of EVTYPE using 'amatch()' function from the "stringdist" package.
+      File name convention is: "ManualMapEVTYPEunique(variable MeasurementColName).csv"
+2. User will copy "ManualMapEVTYPEunique(variable MeasurementColName).csv" to "ManualMapEVTYPEunique(variable MeasurementColName)2.csv" and make manual adjustments if needed.
+3. ON SECOND PASS, (B)Function will look for "ManualMapEVTYPEunique(variable MeasurementColName)2.csv" and include 'adjustedEVTYPE' column to data frame: tmpDF.
+4. (B)Function returns data frame: tmpDF. (See Appendix at end of document)
+
+```{r func1}
+
+#Usage:
+
+# cleanCol <- cleanUpNames(StdEventNames) 
+# # 2 columns: "EVTYPE" and focus column
+# cleanCol(df, col)
+
+cleanUpNames <- function(stdNames){
+      function(tmpDF, colName){
+            # tmpDF is dataframe with 2 columns: "EVTYPE" and focus column
+            
+            # tmpDF <- stormDataFatal
+            # colName = "FATAL"
+            # match up EVTYPE to stdNames list
+            
+            # Use method = 'jw' and maxDist=10 (trial and error)
+             tmpDF <- dplyr::mutate(tmpDF, mapEVTYPEjw10 =
+                                     StdEventNames[amatch(toupper(tmpDF[,1]), StdEventNames$EventName, method = 'jw', maxDist=10),])
+            # Use default (method = 'osa') and maxDist=10
+             tmpDF <- dplyr::mutate(tmpDF, mapEVTYPEosa10 =
+                                     StdEventNames[amatch(toupper(tmpDF[,1]), StdEventNames$EventName, maxDist=10),])
+             # If user did not manually adjust, use method = 'jw' and maxDist=10 as default
+             tmpDF$adjustedEVTYPE <- tmpDF$mapEVTYPEjw10
+
+            ## write distinct match-ups to .csv to review and adjust manually 
+            write.csv(tmpDF, file = paste0("ManualMapEVTYPEunique", colName, ".csv"))
+
+            # manual part - user adjust mapping and save file under this name but with a "2" suffix
+            # on second pass, ManualMapEVTYPEunique2.csv may exist. If so, utilize it.
+            if (file.exists(paste0("ManualMapEVTYPEunique", colName, "2.csv"))){
+                  # read in file
+                  ManualMapEVTYPE <- read.csv(paste0("ManualMapEVTYPEunique", colName, "2.csv"), stringsAsFactors = FALSE)
+
+                  # merge tmpDF with adjusted column
+                  tmpDF <- merge(x=tmpDF, y=ManualMapEVTYPE[,c("EVTYPE", "adjustedEVTYPE", "ManualAdjusted")] )
+                  
+            }
+            #head(tmpDF)
+            tmpDF
+      }
+}
+
+
+```
+
+Closure function usage:
+
+```{r}
+# setup function cleanCol
+
+cleanCol <- cleanUpNames(StdEventNames) 
+```
+
+## Data Processing for cost of human lives analysis
+
+Subset for FATALITIES data: sum, mean, and event type count
+
+```{r}
+
+# Subset for FATALITIES data
+
+# 2 columns: "EVTYPE" and measurement column, either FATALITIES or Injuries, or etc.
+
+# dataframe with 2 columns: "EVTYPE" and measurement column
+
+stormDataFatal <- stormData[(stormData$FATALITIES>0), c("EVTYPE", "FATALITIES")]
+
+# summary(stormDataFatal$FATALITIES)
+
+uniqueMap <- data.frame(EVTYPE = unique(stormDataFatal[,c("EVTYPE")]))
+
+# call function with amatch()/manual adjustments to EVTYPE
+uniqueMap <- cleanCol(uniqueMap, "FATAL")
+
+
+# add "adjustedEVTYPE" from uniqueMap to the initial (non aggregate) data frame
+
+stormDataFatal <- merge(x=stormDataFatal, y=uniqueMap[,c("EVTYPE", "adjustedEVTYPE")] )
+
+
+# aggregate data based on adjustedEVTYPE
+stormDataFatalAgg <- stormDataFatal %>%
+      group_by(adjustedEVTYPE) %>%
+      summarise(Avg = mean(FATALITIES), Sum = sum(FATALITIES), count=n()) %>%
+      mutate(measure = c("FATALITIES"))
+
+#head(stormDataFatalAgg)
+
+```
+
+Subset for INJURIES data: sum, mean, and event type count
+
+```{r}
+# Subset for INJURIES data
+
+# 2 columns: "EVTYPE" and measurement column, either FATALITIES or Injuries, or etc.
+
+# dataframe with 2 columns: "EVTYPE" and measurement column
+
+stormDataInjury <- stormData[(stormData$INJURIES>0), c("EVTYPE", "INJURIES")]
+
+uniqueMap <- data.frame(EVTYPE = unique(stormDataInjury[,c("EVTYPE")]))
+
+uniqueMap <- cleanCol(uniqueMap, "Injury")
+
+# add "adjustedEVTYPE" from uniqueMap to the initial (non aggregate) data frame
+
+stormDataInjury <- merge(x=stormDataInjury, y=uniqueMap[,c("EVTYPE", "adjustedEVTYPE")] )
+
+
+# aggregate data based on adjustedEVTYPE
+stormDataInjuryAgg <- stormDataInjury %>%
+      group_by(adjustedEVTYPE) %>%
+      summarise(Avg = mean(INJURIES), Sum = sum(INJURIES), count=n()) %>%
+      mutate(measure = c("INJURIES"))
+
+#head(stormDataInjuryAgg)
+
+```
+
+Sort out top 20 Average number of Fatalities/Injuries per instance of event type
+
+```{r}
+
+(top20FatalAvg <- head(stormDataFatalAgg[order( stormDataFatalAgg$Avg, decreasing = TRUE),], 20))
+
+(top20InjuryAvg <- head(stormDataInjuryAgg[order( stormDataInjuryAgg$Avg, decreasing = TRUE),], 20))
+
+```
+
+
+Sort out the top 20 Total number of Fatalities/Injuries of each event type
+
+```{r}
+
+(top20FatalSum <- head(stormDataFatalAgg[order( stormDataFatalAgg$Sum, decreasing = TRUE),], 20))
+
+(top20InjurySum <- head(stormDataInjuryAgg[order( stormDataInjuryAgg$Sum, decreasing = TRUE),], 20))
+
+```
+
+
+
+Find which event types (adjustedEVTYPE) are on both of the top 20 Avg and Sum lists
+
+```{r}
+
+# Find the event types that are in both lists of highest number of total injuries (sum) and most injuries per event (average)
+InjuryBothTop20SumAvg <- intersect(top20InjuryAvg$adjustedEVTYPE,top20InjurySum$adjustedEVTYPE)
+
+# Find the event types that are in both lists of highest number of total fatalities (sum) and most fatalities per event (average)
+FatalBothTop20SumAvg <- intersect(top20FatalAvg$adjustedEVTYPE,top20FatalSum$adjustedEVTYPE)
+
+# Find the event types that are in both lists of highest number of total injuries and fatalities
+both <- intersect(InjuryBothTop20SumAvg, FatalBothTop20SumAvg)
+
+# Subset on these event types
+(stormDataFatalAgg[(stormDataFatalAgg$adjustedEVTYPE %in% both), ])
+
+(stormDataInjuryAgg[(stormDataInjuryAgg$adjustedEVTYPE %in% both), ])
+
+harmHealthAgg <- rbind(stormDataFatalAgg[(stormDataFatalAgg$adjustedEVTYPE %in% both), ], stormDataInjuryAgg[(stormDataInjuryAgg$adjustedEVTYPE %in% both), ])
+
+```
+
+
+### Plot out the total number of Fatalities/Injuries for event types
+
+The number of injuries due to TORNADO event (91,394) is an outlier compared to the next highest count from FLOOD (6,791). Change the y-axis plotting range to exclude the outlier. 
+
+```{r}
+
+(rngSum <- range(harmHealthAgg[harmHealthAgg$Sum < max(harmHealthAgg$Sum),c("Sum")]))
+
+
+q <- qplot(adjustedEVTYPE, Sum, data=harmHealthAgg, color = measure )
+q + theme(axis.text.x = element_text(angle = 60, hjust = 1)) +
+      coord_cartesian(ylim=rngSum) +
+      ggtitle("Top 10 Total number of Fatalities/Injuries event types") +
+      labs(x="Event Types",y="Total number per event type") +
+      annotate("text", label = "Tornado injuries is 91,394", x = 9, y = 6500, size = 3, colour = "black")
+
+```
+
+
+### Plot out the average number of Fatalities/Injuries for event types
+
+
+```{r}
+
+(rngAvg <- range(harmHealthAgg[, c("Avg")]))
+q <- qplot(adjustedEVTYPE, Avg, data=harmHealthAgg, color = measure )
+q + theme(axis.text.x = element_text(angle = 60, hjust = 1)) +
+      coord_cartesian(ylim=rngAvg) +
+      ggtitle("Average number of Fatalities/Injuries per instance") +
+      labs(x="Event Types",y="Average per instance of event type") 
+
+```
+
+# Results
+
+## Event types Tornado, Flash Flood, and Heat top list for cost to human lives.
+
+Based on the above lists to represent the event types that caused the most harm to human lives, tornado tops the list of total number of fatalities (5,658) and injuries (91,394) compared to the next highest count of injuries (6,791) from flood. Heat/excessive heat is second on the list for fatalities, totaling more than 3,000 and injuries in 9,000 plus.
+
+On average, tsumanis/Storm surge/tide cause the most fatalities and injuries per instance but occur infrequently. Heat/excessive heat, on average, caused the most fatalities and injuries and occur frequently.
+
+Lightning and thunderstorm wind round up the list with high number of injuries and frequent occurrence.
+
+
+
+
+
+
+# Data Processing for cost of property/crop damages analysis
+
+### PROPDMGEXP and CROPDMGEXP columns of the database
+
+[https://rstudio-pubs-static.s3.amazonaws.com/58957_37b6723ee52b455990e149edde45e5b6.html](https://rstudio-pubs-static.s3.amazonaws.com/58957_37b6723ee52b455990e149edde45e5b6.html)
+
+Based on the site on how to handle exponent value of PROPDMGEXP and CROPDMGEXP columns of the database,
+create a conversion mapping.
+
+> These are possible values of CROPDMGEXP and PROPDMGEXP:
+> 
+> - H,h,K,k,M,m,B,b,+,-,?,0,1,2,3,4,5,6,7,8, and blank-character
+> 
+> - H,h = hundreds = 100
+> 
+> - K,k = kilos = thousands = 1,000
+> 
+> - M,m = millions = 1,000,000
+> 
+> - B,b = billions = 1,000,000,000
+> 
+> - (+) = 1
+> 
+> - (-) = 0
+> 
+> - (?) = 0
+> 
+> - blank/empty character = 0
+> 
+> - numeric 0..8 = 10
+
+
+```{r}
+
+stormDataPropDamage <- stormData[(stormData$PROPDMG>0), c("EVTYPE", "PROPDMG", "PROPDMGEXP")]
+
+DMGEXPList <-c("H","h","K","k","M","m","B","b","+","-","?","0","1","2","3","4","5","6","7","8", " ")
+
+conv <- c(100, 100, 1000, 1000, 100000, 100000, 1000000000,1000000000,1,0,0,10,10,10,10,10,10,10,10,10,0)
+
+EXPMap <- data.frame(DMGEXPList=DMGEXPList, conv =conv)
+
+
+# Include 'conv' column from EXPMap for each PROPDMGEXP
+stormDataPropDamage <- merge(x=stormDataPropDamage, y=EXPMap, by.x="PROPDMGEXP", by.y="DMGEXPList") 
+
+# 
+# stormDataPropDamage <- mutate(stormDataPropDamage, PROPDMGValue = PROPDMG * conv)
+# 
+#  sum(is.na(stormDataPropDamage$conv))
+#  
+#  sum(is.na(stormDataPropDamage$PROPDMG))
+#  sum(is.na(stormDataPropDamage$PROPDMGValue))
+#  
+#  PROPDMGValue
+#  unique(stormDataPropDamage$conv)
+
+# do EVTYPE clean-up
+uniqueMap <- data.frame(EVTYPE = unique(stormDataPropDamage[,c("EVTYPE")]))
+
+uniqueMap <- cleanCol(uniqueMap, "PROPDMG")
+
+
+# merge column "adjustedEVTYPE" from uniqueMap
+stormDataPropDamage <- merge(stormDataPropDamage, uniqueMap[, c("EVTYPE", "adjustedEVTYPE")]) 
+
+stormDataPropDamageGrp <- stormDataPropDamage %>%
+      mutate(PropDmgValue = PROPDMG * conv) %>%
+      group_by(adjustedEVTYPE) %>%
+      summarise(Avg = mean(PropDmgValue), Sum = sum(PropDmgValue), count=n()) %>%
+      arrange(desc(Sum))
+
+#summary(stormDataPropDamageGrp)
+
+
+
+```
+
+Show top 5 property damage values in M (millions) on plot
+
+```{r}
+(Top5PropDmg <-head(stormDataPropDamageGrp, 5))
+
+Top5PropDmg$PropDmgValM <- Top5PropDmg$Sum / 1000000
+Top5PropDmg$PropDmgAvgM <- Top5PropDmg$Avg / 1000000
+
+```
+
+Do the same for Crop Damage
+
+```{r}
+
+stormDataCropDamage <- stormData[(stormData$CROPDMG>0), c("EVTYPE", "CROPDMG", "CROPDMGEXP")]
+
+stormDataCropDamage <- merge(x=stormDataCropDamage, y=EXPMap, by.x="CROPDMGEXP", by.y="DMGEXPList") 
+
+uniqueMap <- data.frame(EVTYPE = unique(stormDataCropDamage[,c("EVTYPE")]))
+
+uniqueMap <- cleanCol(uniqueMap, "CROPDMG")
+
+
+# merge column "adjustedEVTYPE"
+stormDataCropDamage <- merge(stormDataCropDamage, uniqueMap[, c("EVTYPE", "adjustedEVTYPE")]) 
+
+stormDataCropDamageGrp <- stormDataCropDamage %>%
+      mutate(CropDmgValue = CROPDMG * conv) %>%
+           group_by(adjustedEVTYPE) %>%
+      summarise(Avg = mean(CropDmgValue), Sum = sum(CropDmgValue), count=n()) %>%
+      arrange(desc(Sum))
+
+
+#summary(stormDataPropDamageGrp)
+
+
+```
+
+Show top 5 Crop Damage values in M (millions) on plot
+
+```{r}
+
+(Top5CropDmg <- head(stormDataCropDamageGrp,5))
+
+Top5CropDmg$CropDmgValM <- Top5CropDmg$Sum / 1000000
+Top5CropDmg$CropDmgAvgM <- Top5CropDmg$Avg / 1000000
+```
+
+
+### Plot the total amount of damage (in millions), averge damage per event (in millions), and the number of occurrences of top 5 events in terms of total amount of damage
+
+
+```{r}
+
+#set up plot line color
+plotCol <- c("red","gray", "blue")
+
+par(mfrow = c(2, 3), oma = c(0,0,3,0), mar = c(4.3, 11, 2, 2), las=1 )
+# par(mfrow = c(2, 3), oma = c(0,0,3,0), mar = c(6, 12, 4, 3), las=1 )
+
+with(Top5PropDmg, barplot(PropDmgValM, col=plotCol[1], horiz=TRUE, names.arg = adjustedEVTYPE, xlab = "$ damage in millions"))
+with(Top5PropDmg, barplot(PropDmgAvgM, col=plotCol[2], horiz=TRUE, names.arg = adjustedEVTYPE, xlab = "$ avg damage/event in millions"))
+with(Top5PropDmg, barplot(count, col=plotCol[3], horiz=TRUE, names.arg = adjustedEVTYPE, xlab = "Number of occurrences"))
+
+title(main = "Properties (top) and Crops (bottom) damage due to weather events from 1950 to November 2011", outer = TRUE)
+
+with(Top5CropDmg, barplot(CropDmgValM, col=plotCol[1], horiz=TRUE, names.arg = adjustedEVTYPE, xlab = "$ damage in millions"))
+#title(sub="Crops Damages")
+
+with(Top5CropDmg, barplot(CropDmgAvgM, col=plotCol[2], horiz=TRUE, names.arg = adjustedEVTYPE,  xlab = "$ avg damage/event in millions"))
+
+with(Top5CropDmg, barplot(count, col=plotCol[3], horiz=TRUE, names.arg = adjustedEVTYPE, xlab = "Number of occurrences"))
+
+
+```
+
+# Results
+
+## Event types Ice Storm and Drought top list for cost for crops damages while Flood and Hurricane (Typhoon) top for property damages.
+
+Ice Storm and Drought do not occur frequently but they caused the majority of crops damages.
+
+Most property damages appeared to be water related with event types: Flood, Flash Flood, Hurricane (Typhoon), and Storm Surge/Tide.
+
+
+## Appendix:
+
+Additional working files for reproducible factor, manually adjusted EVTYPE:
+
+[Fatalities EVTYPE manual adjustments](https://github.com/ChauLui/ReproducibleResearch/blob/master/ManualMapEVTYPEuniqueFATAL2.csv)
+
+[Injuries EVTYPE manual adjustments](https://github.com/ChauLui/ReproducibleResearch/blob/master/ManualMapEVTYPEuniqueInjury2.csv)
+
+[Crop Damage EVTYPE manual adjustments](https://github.com/ChauLui/ReproducibleResearch/blob/master/ManualMapEVTYPEuniqueCROPDMG2.csv)
+
+[Property Damage EVTYPE manual adjustments](https://github.com/ChauLui/ReproducibleResearch/blob/master/ManualMapEVTYPEuniquePROPDMG2.csv)
+
+
+
+
